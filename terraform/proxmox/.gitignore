@@ -1,0 +1,16 @@
+# Terraform secrets / local values
+terraform.tfvars
+*.tfvars
+!*.tfvars.example
+
+# Terraform state
+*.tfstate
+*.tfstate.*
+
+# Terraform working directory
+**/.terraform/*
+
+# Terraform plans
+*.tfplan
+
+tfplan
