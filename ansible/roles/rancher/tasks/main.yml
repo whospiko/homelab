@@ -1,0 +1,215 @@
+---
+- name: Check K3s cluster
+  ansible.builtin.command:
+    cmd: k3s kubectl get nodes
+  register: k3s_nodes
+  changed_when: false
+
+- name: Show K3s nodes
+  ansible.builtin.debug:
+    var: k3s_nodes.stdout_lines
+
+
+# ---------------------------------------------------------
+# Helm
+# ---------------------------------------------------------
+
+- name: Download Helm installer
+  ansible.builtin.get_url:
+    url: https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+    dest: /tmp/get-helm-3.sh
+    mode: "0755"
+
+- name: Install Helm
+  ansible.builtin.command:
+    cmd: /tmp/get-helm-3.sh
+    creates: /usr/local/bin/helm
+
+
+# ---------------------------------------------------------
+# Label ONLY this control-plane node for Rancher
+# ---------------------------------------------------------
+
+- name: Get Kubernetes node name
+  ansible.builtin.command:
+    cmd: hostname
+  register: rancher_node_name
+  changed_when: false
+
+- name: Label Rancher node
+  ansible.builtin.command:
+    argv:
+      - k3s
+      - kubectl
+      - label
+      - node
+      - "{{ rancher_node_name.stdout }}"
+      - "{{ rancher_node_label_key }}={{ rancher_node_label_value }}"
+      - --overwrite
+  changed_when: false
+
+
+# ---------------------------------------------------------
+# cert-manager
+# ---------------------------------------------------------
+
+- name: Add Jetstack Helm repository
+  ansible.builtin.command:
+    argv:
+      - helm
+      - repo
+      - add
+      - jetstack
+      - https://charts.jetstack.io
+      - --force-update
+  environment:
+    KUBECONFIG: "{{ k3s_kubeconfig }}"
+  changed_when: false
+
+- name: Update Helm repositories
+  ansible.builtin.command:
+    cmd: helm repo update
+  environment:
+    KUBECONFIG: "{{ k3s_kubeconfig }}"
+  changed_when: false
+
+- name: Install cert-manager
+  ansible.builtin.command:
+    argv:
+      - helm
+      - upgrade
+      - --install
+      - cert-manager
+      - jetstack/cert-manager
+      - --namespace
+      - cert-manager
+      - --create-namespace
+      - --set
+      - crds.enabled=true
+      - --wait
+      - --timeout
+      - 5m
+  environment:
+    KUBECONFIG: "{{ k3s_kubeconfig }}"
+
+- name: Wait for cert-manager
+  ansible.builtin.command:
+    argv:
+      - k3s
+      - kubectl
+      - rollout
+      - status
+      - deployment/cert-manager
+      - --namespace
+      - cert-manager
+      - --timeout=300s
+  changed_when: false
+
+
+# ---------------------------------------------------------
+# Rancher
+# ---------------------------------------------------------
+
+- name: Add Rancher stable Helm repository
+  ansible.builtin.command:
+    argv:
+      - helm
+      - repo
+      - add
+      - rancher-stable
+      - https://releases.rancher.com/server-charts/stable
+      - --force-update
+  environment:
+    KUBECONFIG: "{{ k3s_kubeconfig }}"
+  changed_when: false
+
+- name: Update Helm repositories
+  ansible.builtin.command:
+    cmd: helm repo update
+  environment:
+    KUBECONFIG: "{{ k3s_kubeconfig }}"
+  changed_when: false
+
+- name: Install Rancher
+  ansible.builtin.command:
+    argv:
+      - helm
+      - upgrade
+      - --install
+      - rancher
+      - rancher-stable/rancher
+      - --namespace
+      - "{{ rancher_namespace }}"
+      - --create-namespace
+      - --set
+      - "hostname={{ rancher_hostname }}"
+      - --set
+      - "replicas={{ rancher_replicas }}"
+      - --set-string
+      - "bootstrapPassword={{ rancher_bootstrap_password }}"
+      - --wait
+      - --timeout
+      - 10m
+  environment:
+    KUBECONFIG: "{{ k3s_kubeconfig }}"
+  no_log: true
+
+
+# ---------------------------------------------------------
+# Force Rancher onto ONLY .100
+# ---------------------------------------------------------
+
+- name: Pin Rancher deployment to this control-plane node
+  ansible.builtin.command:
+    argv:
+      - k3s
+      - kubectl
+      - patch
+      - deployment
+      - rancher
+      - --namespace
+      - "{{ rancher_namespace }}"
+      - --type
+      - merge
+      - --patch
+      - >-
+        {"spec":{"template":{"spec":{"nodeSelector":{"{{ rancher_node_label_key }}":"{{ rancher_node_label_value }}"}}}}}
+  changed_when: false
+
+- name: Wait for Rancher rollout after node pinning
+  ansible.builtin.command:
+    argv:
+      - k3s
+      - kubectl
+      - rollout
+      - status
+      - deployment/rancher
+      - --namespace
+      - "{{ rancher_namespace }}"
+      - --timeout=600s
+  changed_when: false
+
+
+# ---------------------------------------------------------
+# Verification
+# ---------------------------------------------------------
+
+- name: Check Rancher pod location
+  ansible.builtin.command:
+    argv:
+      - k3s
+      - kubectl
+      - get
+      - pods
+      - --namespace
+      - "{{ rancher_namespace }}"
+      - --selector
+      - app=rancher
+      - -o
+      - wide
+  register: rancher_pods
+  changed_when: false
+
+- name: Show Rancher pod
+  ansible.builtin.debug:
+    var: rancher_pods.stdout_lines

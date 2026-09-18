@@ -1,0 +1,13 @@
+---
+- name: Install Rancher
+  hosts: rancher_hosts
+  become: true
+  gather_facts: true
+
+  vars_prompt:
+    - name: rancher_bootstrap_password
+      prompt: "Enter Rancher bootstrap admin password"
+      private: true
+
+  roles:
+    - rancher

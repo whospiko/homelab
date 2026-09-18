@@ -1,10 +1,27 @@
 ---
-- name: Install K3s control plane
-  hosts: k3s_servers
+- name: Install primary K3s server
+  hosts: "{{ groups['k3s_servers'][0] }}"
   become: true
   gather_facts: true
 
   roles:
-    - role: k3s
-      vars:
-        k3s_mode: server
+    - k3s
+
+
+- name: Join additional K3s servers
+  hosts: "k3s_servers:!{{ groups['k3s_servers'][0] }}"
+  serial: 1
+  become: true
+  gather_facts: true
+
+  roles:
+    - k3s
+
+
+- name: Join K3s worker nodes
+  hosts: k3s_agents
+  become: true
+  gather_facts: true
+
+  roles:
+    - k3s

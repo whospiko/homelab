@@ -1,0 +1,319 @@
+---
+# =========================================================
+# COMMON SERVER PREPARATION
+# =========================================================
+
+- name: Create K3s configuration directory
+  ansible.builtin.file:
+    path: "{{ k3s_config_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+
+- name: Create K3s config drop-in directory
+  ansible.builtin.file:
+    path: "{{ k3s_config_dir }}/config.yaml.d"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+
+- name: Download K3s install script
+  ansible.builtin.get_url:
+    url: "{{ k3s_install_url }}"
+    dest: "{{ k3s_install_script }}"
+    owner: root
+    group: root
+    mode: "0755"
+
+
+# =========================================================
+# PRIMARY SERVER
+# =========================================================
+
+- name: Configure primary K3s server
+  ansible.builtin.copy:
+    dest: "{{ k3s_config_file }}"
+    owner: root
+    group: root
+    mode: "0600"
+    content: |
+      cluster-init: true
+
+      node-name: "{{ inventory_hostname }}"
+      node-ip: "{{ ansible_host }}"
+
+      write-kubeconfig-mode: "0600"
+
+      tls-san:
+      {% for san in k3s_tls_sans %}
+        - "{{ san }}"
+      {% endfor %}
+  register: k3s_primary_config
+  when:
+    - inventory_hostname == k3s_primary_server
+
+
+- name: Install primary K3s server
+  ansible.builtin.command:
+    cmd: "{{ k3s_install_script }}"
+    creates: /etc/systemd/system/k3s.service
+  environment:
+    INSTALL_K3S_CHANNEL: "{{ k3s_channel }}"
+    INSTALL_K3S_EXEC: "server"
+  register: k3s_primary_install
+  when:
+    - inventory_hostname == k3s_primary_server
+
+
+- name: Restart primary K3s server when configuration changes
+  ansible.builtin.systemd_service:
+    name: k3s
+    state: restarted
+    enabled: true
+    daemon_reload: true
+  when:
+    - inventory_hostname == k3s_primary_server
+    - k3s_primary_config.changed
+    - not k3s_primary_install.changed
+
+
+- name: Ensure primary K3s service is running
+  ansible.builtin.systemd_service:
+    name: k3s
+    state: started
+    enabled: true
+  when:
+    - inventory_hostname == k3s_primary_server
+
+
+- name: Wait for primary K3s API
+  ansible.builtin.wait_for:
+    host: "{{ k3s_registration_address }}"
+    port: "{{ k3s_api_port }}"
+    timeout: 180
+  when:
+    - inventory_hostname == k3s_primary_server
+
+
+- name: Wait for primary K3s token
+  ansible.builtin.wait_for:
+    path: /var/lib/rancher/k3s/server/token
+    timeout: 120
+  when:
+    - inventory_hostname == k3s_primary_server
+
+
+# =========================================================
+# ADDITIONAL CONTROL-PLANE SERVERS
+# =========================================================
+
+- name: Wait for primary K3s API before joining
+  ansible.builtin.wait_for:
+    host: "{{ k3s_registration_address }}"
+    port: "{{ k3s_api_port }}"
+    timeout: 180
+  when:
+    - inventory_hostname != k3s_primary_server
+
+
+- name: Read K3s server token from primary
+  ansible.builtin.slurp:
+    src: /var/lib/rancher/k3s/server/token
+  register: k3s_server_token_raw
+  delegate_to: "{{ k3s_primary_server }}"
+  no_log: true
+  when:
+    - inventory_hostname != k3s_primary_server
+
+
+- name: Store K3s server token locally
+  ansible.builtin.copy:
+    dest: "{{ k3s_join_token_file }}"
+    content: "{{ k3s_server_token_raw.content | b64decode | trim }}\n"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  when:
+    - inventory_hostname != k3s_primary_server
+
+
+- name: Configure additional K3s server
+  ansible.builtin.copy:
+    dest: "{{ k3s_config_file }}"
+    owner: root
+    group: root
+    mode: "0600"
+    content: |
+      server: "https://{{ k3s_registration_address }}:{{ k3s_api_port }}"
+      token-file: "{{ k3s_join_token_file }}"
+
+      node-name: "{{ inventory_hostname }}"
+      node-ip: "{{ ansible_host }}"
+
+      write-kubeconfig-mode: "0600"
+
+      tls-san:
+      {% for san in k3s_tls_sans %}
+        - "{{ san }}"
+      {% endfor %}
+  register: k3s_additional_server_config
+  no_log: true
+  when:
+    - inventory_hostname != k3s_primary_server
+
+
+- name: Install additional K3s server
+  ansible.builtin.command:
+    cmd: "{{ k3s_install_script }}"
+    creates: /etc/systemd/system/k3s.service
+  environment:
+    INSTALL_K3S_CHANNEL: "{{ k3s_channel }}"
+    INSTALL_K3S_EXEC: "server"
+  register: k3s_additional_server_install
+  when:
+    - inventory_hostname != k3s_primary_server
+
+
+- name: Restart additional K3s server when configuration changes
+  ansible.builtin.systemd_service:
+    name: k3s
+    state: restarted
+    enabled: true
+    daemon_reload: true
+  when:
+    - inventory_hostname != k3s_primary_server
+    - k3s_additional_server_config.changed
+    - not k3s_additional_server_install.changed
+
+
+- name: Ensure additional K3s server is running
+  ansible.builtin.systemd_service:
+    name: k3s
+    state: started
+    enabled: true
+  when:
+    - inventory_hostname != k3s_primary_server
+
+
+# =========================================================
+# KUBECTL SETUP FOR ALL CONTROL-PLANE SERVERS
+# =========================================================
+
+- name: Wait for K3s admin kubeconfig
+  ansible.builtin.wait_for:
+    path: /etc/rancher/k3s/k3s.yaml
+    timeout: 120
+
+
+# ---------------------------------------------------------
+# Make K3s directories traversable
+# ---------------------------------------------------------
+
+- name: Ensure K3s configuration directory is traversable
+  ansible.builtin.file:
+    path: /etc/rancher/k3s
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+
+- name: Ensure K3s config drop-in directory is traversable
+  ansible.builtin.file:
+    path: /etc/rancher/k3s/config.yaml.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+
+- name: Protect K3s server configuration
+  ansible.builtin.file:
+    path: /etc/rancher/k3s/config.yaml
+    owner: root
+    group: root
+    mode: "0600"
+
+
+# ---------------------------------------------------------
+# kubectl command
+# ---------------------------------------------------------
+
+- name: Create system kubectl command
+  ansible.builtin.file:
+    src: /usr/local/bin/k3s
+    dest: /usr/bin/kubectl
+    state: link
+    force: true
+
+
+# =========================================================
+# KUBECTL FOR ROCKY USER
+# =========================================================
+
+- name: Create kube directory for admin user
+  ansible.builtin.file:
+    path: "/home/{{ k3s_admin_user }}/.kube"
+    state: directory
+    owner: "{{ k3s_admin_user }}"
+    group: "{{ k3s_admin_user }}"
+    mode: "0700"
+
+
+- name: Copy K3s kubeconfig to admin user
+  ansible.builtin.copy:
+    src: /etc/rancher/k3s/k3s.yaml
+    dest: "/home/{{ k3s_admin_user }}/.kube/config"
+    remote_src: true
+    owner: "{{ k3s_admin_user }}"
+    group: "{{ k3s_admin_user }}"
+    mode: "0600"
+
+
+# =========================================================
+# KUBECTL FOR ROOT
+# =========================================================
+
+- name: Create root kube directory
+  ansible.builtin.file:
+    path: /root/.kube
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+
+- name: Copy K3s kubeconfig to root
+  ansible.builtin.copy:
+    src: /etc/rancher/k3s/k3s.yaml
+    dest: /root/.kube/config
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0600"
+
+
+# =========================================================
+# VERIFY CLUSTER
+# =========================================================
+
+- name: Verify kubectl as admin user
+  ansible.builtin.command:
+    cmd: /usr/bin/kubectl get nodes -o wide
+  become: true
+  become_user: "{{ k3s_admin_user }}"
+  environment:
+    HOME: "/home/{{ k3s_admin_user }}"
+    KUBECONFIG: "/home/{{ k3s_admin_user }}/.kube/config"
+  register: kubectl_nodes
+  changed_when: false
+
+
+- name: Show Kubernetes nodes
+  ansible.builtin.debug:
+    var: kubectl_nodes.stdout_lines
