@@ -1,14 +1,29 @@
-output "test_vm_id" {
-  description = "Proxmox VM ID of the test VM"
-  value       = module.test_vm.vm_id
+output "cp_01_vm_id" {
+  description = "Proxmox VM ID of the Control Plan 01 VM"
+  value       = module.cp-01.vm_id
 }
 
-output "test_vm_name" {
-  description = "Name of the test VM"
-  value       = module.test_vm.name
+output "cp_01_vm_name" {
+  description = "Name of the Control Plan 01 VM"
+  value       = module.cp-01.name
 }
 
-output "test_vm_mac_addresses" {
-  description = "MAC addresses assigned to the test VM"
-  value       = module.test_vm.mac_addresses
+output "worker_01_vm_id" {
+  description = "Proxmox VM ID of the Workder 01 VM"
+  value       = module.worker-01.vm_id
+}
+
+output "worker_01_vm_name" {
+  description = "Name of the Workder 01 VM"
+  value = module.worker-01.name
+}
+
+output "worker_99_vm_id" {
+  description = "Proxmox VM ID of the Worker 99 VM (Database)"
+  value       = module.worker-99.vm_id
+}
+
+output "worker_99_vm_name" {
+  description = "Name of the Worker 99 VM (Database)"
+  value = module.worker-99.name
 }

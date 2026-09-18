@@ -82,3 +82,8 @@ variable "qemu_agent_enabled" {
   type        = bool
   default     = false
 }
+
+variable "tags" {
+  description = "VM Tags"
+  type = list(string)
+}
