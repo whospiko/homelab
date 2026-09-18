@@ -7,8 +7,25 @@ all:
   children:
     k3s_servers:
       hosts:
-        k3s-cp-01:
+        cp-01:
           ansible_host: 192.168.100.100
 
+      # Add later:
+      # k3s-cp-02:
+      #   ansible_host: 192.168.100.110
+      #
+      # k3s-cp-03:
+      #   ansible_host: 192.168.100.120
+
     k3s_agents:
-      hosts: {}
+      hosts:
+        worker-01:
+          ansible_host: 192.168.100.200
+
+      # Add later:
+      # k3s-worker-02:
+      #   ansible_host: 192.168.100.102
+
+    rancher_hosts:
+      hosts:
+        cp-01:

@@ -1,3 +1,29 @@
 ---
-k3s_channel: stable
-k3s_install_script: /tmp/install-k3s.sh
+k3s_channel: "stable"
+
+k3s_install_url: "https://get.k3s.io"
+k3s_install_script: "/tmp/install-k3s.sh"
+
+k3s_config_dir: "/etc/rancher/k3s"
+k3s_config_file: "/etc/rancher/k3s/config.yaml"
+
+k3s_join_token_file: "/etc/rancher/k3s/join-token"
+
+k3s_primary_server: "{{ groups['k3s_servers'][0] }}"
+
+k3s_primary_ip: >-
+  {{
+    hostvars[k3s_primary_server].ansible_host
+    | default(k3s_primary_server)
+  }}
+
+k3s_registration_address: "{{ k3s_primary_ip }}"
+k3s_api_port: 6443
+
+k3s_cluster_cidr: "10.42.0.0/16"
+k3s_service_cidr: "10.43.0.0/16"
+
+k3s_admin_user: "rocky"
+
+k3s_tls_sans:
+  - "{{ k3s_registration_address }}"

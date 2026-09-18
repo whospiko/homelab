@@ -1,24 +1,133 @@
 ---
-- name: Download K3s installation script
-  ansible.builtin.get_url:
-    url: https://get.k3s.io
-    dest: "{{ k3s_install_script }}"
-    mode: "0755"
+- name: Verify host belongs to a K3s group
+  ansible.builtin.assert:
+    that:
+      - >
+        inventory_hostname in groups.get('k3s_servers', [])
+        or
+        inventory_hostname in groups.get('k3s_agents', [])
+    fail_msg: >-
+      Host {{ inventory_hostname }} must belong to
+      k3s_servers or k3s_agents.
 
-- name: Install K3s server
-  ansible.builtin.command:
-    cmd: "{{ k3s_install_script }}"
-    creates: /usr/local/bin/k3s
-  environment:
-    INSTALL_K3S_CHANNEL: "{{ k3s_channel }}"
-  when: k3s_mode == "server"
 
-- name: Install K3s agent
+# ---------------------------------------------------------
+# OS requirements
+# ---------------------------------------------------------
+
+- name: Install K3s OS requirements
+  ansible.builtin.dnf:
+    name:
+      - curl
+      - firewalld
+      - kernel-modules-extra
+    state: present
+
+
+- name: Ensure firewalld is running
+  ansible.builtin.systemd_service:
+    name: firewalld
+    state: started
+    enabled: true
+
+
+# ---------------------------------------------------------
+# Common K3s firewall rules
+# ---------------------------------------------------------
+
+- name: Trust K3s pod network
   ansible.builtin.command:
-    cmd: "{{ k3s_install_script }}"
-    creates: /usr/local/bin/k3s
-  environment:
-    INSTALL_K3S_CHANNEL: "{{ k3s_channel }}"
-    K3S_URL: "https://{{ k3s_server_ip }}:6443"
-    K3S_TOKEN: "{{ k3s_token }}"
-  when: k3s_mode == "agent"
+    cmd: >-
+      firewall-cmd
+      --permanent
+      --zone=trusted
+      --add-source={{ k3s_cluster_cidr }}
+  register: firewall_pod_network
+  changed_when:
+    - "'ALREADY_ENABLED' not in firewall_pod_network.stderr"
+
+
+- name: Trust K3s service network
+  ansible.builtin.command:
+    cmd: >-
+      firewall-cmd
+      --permanent
+      --zone=trusted
+      --add-source={{ k3s_service_cidr }}
+  register: firewall_service_network
+  changed_when:
+    - "'ALREADY_ENABLED' not in firewall_service_network.stderr"
+
+
+- name: Allow Flannel VXLAN
+  ansible.builtin.command:
+    cmd: firewall-cmd --permanent --add-port=8472/udp
+  register: firewall_flannel
+  changed_when:
+    - "'ALREADY_ENABLED' not in firewall_flannel.stderr"
+
+
+- name: Allow Kubelet API
+  ansible.builtin.command:
+    cmd: firewall-cmd --permanent --add-port=10250/tcp
+  register: firewall_kubelet
+  changed_when:
+    - "'ALREADY_ENABLED' not in firewall_kubelet.stderr"
+
+
+# ---------------------------------------------------------
+# Control-plane-only firewall
+# ---------------------------------------------------------
+
+- name: Allow Kubernetes API
+  ansible.builtin.command:
+    cmd: firewall-cmd --permanent --add-port=6443/tcp
+  register: firewall_kube_api
+  changed_when:
+    - "'ALREADY_ENABLED' not in firewall_kube_api.stderr"
+  when:
+    - inventory_hostname in groups.get('k3s_servers', [])
+
+
+- name: Allow embedded etcd client traffic
+  ansible.builtin.command:
+    cmd: firewall-cmd --permanent --add-port=2379/tcp
+  register: firewall_etcd_client
+  changed_when:
+    - "'ALREADY_ENABLED' not in firewall_etcd_client.stderr"
+  when:
+    - inventory_hostname in groups.get('k3s_servers', [])
+
+
+- name: Allow embedded etcd peer traffic
+  ansible.builtin.command:
+    cmd: firewall-cmd --permanent --add-port=2380/tcp
+  register: firewall_etcd_peer
+  changed_when:
+    - "'ALREADY_ENABLED' not in firewall_etcd_peer.stderr"
+  when:
+    - inventory_hostname in groups.get('k3s_servers', [])
+
+
+- name: Reload firewalld
+  ansible.builtin.command:
+    cmd: firewall-cmd --reload
+  changed_when: false
+
+
+# ---------------------------------------------------------
+# Dispatch K3s role
+# ---------------------------------------------------------
+
+- name: Configure K3s server
+  ansible.builtin.include_tasks:
+    file: server.yml
+  when:
+    - inventory_hostname in groups.get('k3s_servers', [])
+
+
+- name: Configure K3s agent
+  ansible.builtin.include_tasks:
+    file: agent.yml
+  when:
+    - inventory_hostname in groups.get('k3s_agents', [])

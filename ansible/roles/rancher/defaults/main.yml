@@ -1,0 +1,11 @@
+---
+rancher_hostname: "192.168.100.100.sslip.io"
+
+rancher_namespace: "cattle-system"
+
+rancher_replicas: 1
+
+rancher_node_label_key: "homelab.io/rancher"
+rancher_node_label_value: "true"
+
+k3s_kubeconfig: "/etc/rancher/k3s/k3s.yaml"
