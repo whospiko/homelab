@@ -1,0 +1,12 @@
+---
+- name: Update homelab servers
+  hosts: all
+  become: true
+  gather_facts: true
+
+  tasks:
+    - name: Update all installed packages
+      ansible.builtin.dnf:
+        name: "*"
+        state: latest
+        update_cache: true
