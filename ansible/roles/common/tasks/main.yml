@@ -1,0 +1,75 @@
+---
+- name: Update package metadata
+  ansible.builtin.dnf:
+    update_cache: true
+
+- name: Install DNF plugins
+  ansible.builtin.dnf:
+    name: dnf-plugins-core
+    state: present
+
+- name: Enable CRB repository
+  ansible.builtin.command:
+    cmd: dnf config-manager --set-enabled crb
+  changed_when: false
+
+- name: Install EPEL repository
+  ansible.builtin.dnf:
+    name: epel-release
+    state: present
+
+- name: Refresh package metadata
+  ansible.builtin.dnf:
+    update_cache: true
+
+- name: Install common packages
+  ansible.builtin.dnf:
+    name: "{{ common_packages }}"
+    state: present
+
+- name: Check if QEMU guest agent device exists
+  ansible.builtin.stat:
+    path: /dev/virtio-ports/org.qemu.guest_agent.0
+  register: qemu_ga_dev
+
+- name: Enable QEMU guest agent
+  ansible.builtin.service:
+    name: qemu-guest-agent
+    state: started
+    enabled: true
+  when: qemu_ga_dev.stat.exists
+
+- name: Configure timezone
+  ansible.builtin.file:
+    src: /usr/share/zoneinfo/Asia/Phnom_Penh
+    dest: /etc/localtime
+    state: link
+    force: true
+
+- name: Configure SSH hardening
+  ansible.builtin.copy:
+    dest: /etc/ssh/sshd_config.d/99-homelab.conf
+    owner: root
+    group: root
+    mode: "0600"
+    content: |
+      PubkeyAuthentication yes
+      PasswordAuthentication no
+      KbdInteractiveAuthentication no
+      PermitRootLogin no
+      AllowUsers rocky
+      X11Forwarding no
+      MaxAuthTries 3
+      LoginGraceTime 30
+  notify: Restart sshd
+
+- name: Install firewalld
+  ansible.builtin.dnf:
+    name: firewalld
+    state: present
+
+- name: Ensure firewalld is enabled
+  ansible.builtin.service:
+    name: firewalld
+    state: started
+    enabled: true
