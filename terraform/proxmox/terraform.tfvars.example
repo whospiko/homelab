@@ -4,5 +4,3 @@ proxmox_node     = "pve"
 proxmox_api_token = "terraform@pve!terraform=CHANGE_ME"
 
 ssh_public_key = "ssh-ed25519 YOUR_PUBLIC_KEY"
-
-vm_password = "CHANGE_ME"

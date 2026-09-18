@@ -13,6 +13,11 @@ variable "vm_id" {
   type        = number
 }
 
+variable "template_vm_id" {
+  description = "Proxmox Rocky Linux template VM ID"
+  type        = number
+}
+
 variable "cores" {
   description = "Number of CPU cores"
   type        = number
@@ -37,10 +42,6 @@ variable "datastore_id" {
   default     = "local-lvm"
 }
 
-variable "iso_file_id" {
-  description = "Proxmox ISO file ID"
-  type        = string
-}
 
 variable "network_bridge" {
   description = "Proxmox network bridge"
@@ -59,16 +60,16 @@ variable "ipv4_gateway" {
   type        = string
 }
 
+variable "dns_servers" {
+  type        = list(string)
+  description = "A list of dns servers"
+  default     = ["1.1.1.1", "8.8.8.8"]
+}
+
 variable "username" {
   description = "Cloud-Init username"
   type        = string
   default     = "root"
-}
-
-variable "password" {
-  description = "Cloud-Init password"
-  type        = string
-  sensitive   = true
 }
 
 variable "ssh_public_key" {
