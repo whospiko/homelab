@@ -1,4 +1,8 @@
 ---
+# =========================================================
+# AGENT PREPARATION
+# =========================================================
+
 - name: Create K3s configuration directory
   ansible.builtin.file:
     path: "{{ k3s_config_dir }}"
@@ -8,7 +12,7 @@
     mode: "0755"
 
 
-- name: Download K3s install script
+- name: Download K3s installer
   ansible.builtin.get_url:
     url: "{{ k3s_install_url }}"
     dest: "{{ k3s_install_script }}"
@@ -17,12 +21,20 @@
     mode: "0755"
 
 
-- name: Wait for K3s API
+# =========================================================
+# WAIT FOR CONTROL PLANE
+# =========================================================
+
+- name: Wait for K3s primary API
   ansible.builtin.wait_for:
     host: "{{ k3s_registration_address }}"
     port: "{{ k3s_api_port }}"
     timeout: 180
 
+
+# =========================================================
+# TOKEN
+# =========================================================
 
 - name: Read K3s token from primary server
   ansible.builtin.slurp:
@@ -32,7 +44,7 @@
   no_log: true
 
 
-- name: Store K3s join token
+- name: Store K3s agent join token
   ansible.builtin.copy:
     dest: "{{ k3s_join_token_file }}"
     content: "{{ k3s_agent_token_raw.content | b64decode | trim }}\n"
@@ -41,6 +53,42 @@
     mode: "0600"
   no_log: true
 
+
+# =========================================================
+# CHECK INSTALLED VERSION
+# =========================================================
+
+- name: Check installed K3s version
+  ansible.builtin.command:
+    argv:
+      - "{{ k3s_binary }}"
+      - --version
+  register: k3s_agent_installed_version
+  changed_when: false
+  failed_when: false
+
+
+- name: Check K3s agent service
+  ansible.builtin.stat:
+    path: /etc/systemd/system/k3s-agent.service
+  register: k3s_agent_service
+
+
+- name: Determine whether K3s agent installation is required
+  ansible.builtin.set_fact:
+    k3s_agent_install_required: >-
+      {{
+        k3s_agent_installed_version.rc != 0
+        or
+        k3s_version not in k3s_agent_installed_version.stdout
+        or
+        not k3s_agent_service.stat.exists
+      }}
+
+
+# =========================================================
+# AGENT CONFIG
+# =========================================================
 
 - name: Configure K3s agent
   ansible.builtin.copy:
@@ -53,19 +101,26 @@
       token-file: "{{ k3s_join_token_file }}"
 
       node-name: "{{ inventory_hostname }}"
-      node-ip: "{{ ansible_host }}"
+      node-ip: "{{ ansible_host | default(ansible_default_ipv4.address) }}"
+
+      prefer-bundled-bin: {{ k3s_prefer_bundled_bin | ternary('true', 'false') }}
   register: k3s_agent_config
   no_log: true
 
 
+# =========================================================
+# INSTALL AGENT
+# =========================================================
+
 - name: Install K3s agent
   ansible.builtin.command:
     cmd: "{{ k3s_install_script }}"
-    creates: /etc/systemd/system/k3s-agent.service
   environment:
-    INSTALL_K3S_CHANNEL: "{{ k3s_channel }}"
+    INSTALL_K3S_VERSION: "{{ k3s_version }}"
     INSTALL_K3S_EXEC: "agent"
   register: k3s_agent_install
+  when:
+    - k3s_agent_install_required | bool
 
 
 - name: Restart K3s agent when configuration changes
@@ -76,7 +131,7 @@
     daemon_reload: true
   when:
     - k3s_agent_config.changed
-    - not k3s_agent_install.changed
+    - not k3s_agent_install_required | bool
 
 
 - name: Ensure K3s agent is running

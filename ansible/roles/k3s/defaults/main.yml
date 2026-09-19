@@ -1,29 +1,97 @@
 ---
-k3s_channel: "stable"
+# =========================================================
+# VERSION
+# =========================================================
+
+# Pin K3s instead of following the moving stable channel.
+k3s_version: "v1.36.4+k3s1"
 
 k3s_install_url: "https://get.k3s.io"
 k3s_install_script: "/tmp/install-k3s.sh"
+
+
+# =========================================================
+# PATHS
+# =========================================================
 
 k3s_config_dir: "/etc/rancher/k3s"
 k3s_config_file: "/etc/rancher/k3s/config.yaml"
 
 k3s_join_token_file: "/etc/rancher/k3s/join-token"
 
+k3s_binary: "/usr/local/bin/k3s"
+k3s_kubeconfig: "/etc/rancher/k3s/k3s.yaml"
+
+
+# =========================================================
+# CLUSTER
+# =========================================================
+
 k3s_primary_server: "{{ groups['k3s_servers'][0] }}"
 
 k3s_primary_ip: >-
   {{
     hostvars[k3s_primary_server].ansible_host
-    | default(k3s_primary_server)
+    | default(
+        hostvars[k3s_primary_server].ansible_default_ipv4.address
+      )
   }}
 
 k3s_registration_address: "{{ k3s_primary_ip }}"
 k3s_api_port: 6443
 
+
+# =========================================================
+# NETWORKING
+# =========================================================
+
 k3s_cluster_cidr: "10.42.0.0/16"
 k3s_service_cidr: "10.43.0.0/16"
 
+# First service IP is normally the kubernetes.default service.
+k3s_kubernetes_service_ip: "10.43.0.1"
+
+k3s_flannel_backend: "vxlan"
+
+# Use K3s-bundled userspace networking binaries instead of
+# relying on the Rocky host's iptables/nftables implementation.
+k3s_prefer_bundled_bin: true
+
+
+# =========================================================
+# KERNEL MODULES
+# =========================================================
+
+k3s_kernel_modules:
+  - overlay
+  - br_netfilter
+  - vxlan
+
+
+# =========================================================
+# ADMIN USER
+# =========================================================
+
 k3s_admin_user: "rocky"
+k3s_admin_group: "rocky"
+
+
+# =========================================================
+# TLS
+# =========================================================
 
 k3s_tls_sans:
   - "{{ k3s_registration_address }}"
+
+
+# =========================================================
+# HEALTH CHECK
+# =========================================================
+
+k3s_node_ready_timeout: "300s"
+k3s_component_ready_timeout: "300s"
+
+# Test Pod -> Kubernetes ClusterIP connectivity from every node.
+k3s_network_test_enabled: true
+k3s_network_test_image: "busybox:1.36"
+k3s_network_test_timeout: "120s"

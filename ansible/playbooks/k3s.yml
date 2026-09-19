@@ -1,27 +1,40 @@
 ---
-- name: Install primary K3s server
-  hosts: "{{ groups['k3s_servers'][0] }}"
+# =========================================================
+# K3S CLUSTER
+# =========================================================
+#
+# Inventory groups:
+#
+#   k3s_servers:
+#     - cp-01
+#
+#   k3s_agents:
+#     - worker-01
+#
+# The k3s role is responsible for:
+#
+#   - K3s prerequisites
+#   - kernel modules
+#   - sysctl
+#   - firewalld handling
+#   - primary control-plane installation
+#   - additional control-plane joins
+#   - worker joins
+#   - kubeconfig setup
+#   - cluster health checks
+#   - Kubernetes service network test
+#
+# =========================================================
+
+- name: Install K3s cluster
+  hosts: "k3s_servers:k3s_agents"
+
   become: true
   gather_facts: true
 
-  roles:
-    - k3s
-
-
-- name: Join additional K3s servers
-  hosts: "k3s_servers:!{{ groups['k3s_servers'][0] }}"
-  serial: 1
-  become: true
-  gather_facts: true
+  # Stop the whole cluster deployment when one node fails.
+  # This prevents continuing with a partially configured cluster.
+  any_errors_fatal: true
 
   roles:
-    - k3s
-
-
-- name: Join K3s worker nodes
-  hosts: k3s_agents
-  become: true
-  gather_facts: true
-
-  roles:
-    - k3s
+    - role: k3s

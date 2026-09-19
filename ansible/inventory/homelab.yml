@@ -1,3 +1,4 @@
+---
 all:
   vars:
     ansible_user: rocky
@@ -5,27 +6,57 @@ all:
     ansible_python_interpreter: /usr/bin/python3
 
   children:
+
+    # =====================================================
+    # K3S CONTROL PLANE
+    # =====================================================
+
     k3s_servers:
       hosts:
+
         cp-01:
           ansible_host: 192.168.100.100
 
-      # Add later:
-      # k3s-cp-02:
-      #   ansible_host: 192.168.100.110
-      #
-      # k3s-cp-03:
-      #   ansible_host: 192.168.100.120
+        # Future HA control-plane nodes
+        #
+        # cp-02:
+        #   ansible_host: 192.168.100.110
+        #
+        # cp-03:
+        #   ansible_host: 192.168.100.120
+
+
+    # =====================================================
+    # K3S WORKERS
+    # =====================================================
 
     k3s_agents:
       hosts:
+
         worker-01:
           ansible_host: 192.168.100.200
 
-      # Add later:
-      # k3s-worker-02:
-      #   ansible_host: 192.168.100.102
+        # Future workers
+        #
+        # worker-02:
+        #   ansible_host: 192.168.100.201
+        #
+        # worker-03:
+        #   ansible_host: 192.168.100.202
+
+
+    # =====================================================
+    # RANCHER INSTALLATION HOST
+    # =====================================================
+    #
+    # This means Ansible/Helm executes Rancher installation
+    # from cp-01.
+    #
+    # It does NOT force the Rancher Pod to run on cp-01.
+    #
+    # =====================================================
 
     rancher_hosts:
       hosts:
+
         cp-01:
