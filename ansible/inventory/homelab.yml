@@ -58,5 +58,8 @@ all:
 
     rancher_hosts:
       hosts:
+        cp-01:
 
+    cluster_admin_hosts:
+      hosts:
         cp-01:
