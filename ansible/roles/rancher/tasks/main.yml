@@ -1,123 +1,420 @@
 ---
-- name: Check K3s cluster
+# =========================================================
+# K3S PREFLIGHT
+# =========================================================
+
+- name: Verify K3s kubeconfig exists
+  ansible.builtin.stat:
+    path: "{{ k3s_kubeconfig }}"
+  register: rancher_kubeconfig
+
+- name: Fail when K3s kubeconfig does not exist
+  ansible.builtin.assert:
+    that:
+      - rancher_kubeconfig.stat.exists
+    fail_msg: >-
+      K3s kubeconfig {{ k3s_kubeconfig }} does not exist.
+      Install and verify K3s before installing Rancher.
+
+
+# =========================================================
+# VERIFY NODES
+# =========================================================
+
+- name: Wait for all Kubernetes nodes to be Ready
   ansible.builtin.command:
-    cmd: k3s kubectl get nodes
-  register: k3s_nodes
+    argv:
+      - "{{ k3s_binary }}"
+      - kubectl
+      - wait
+      - --for=condition=Ready
+      - nodes
+      - --all
+      - --timeout=300s
+  environment:
+    KUBECONFIG: "{{ k3s_kubeconfig }}"
   changed_when: false
 
-- name: Show K3s nodes
+
+# =========================================================
+# VERIFY CORE K3S COMPONENTS
+# =========================================================
+
+- name: Wait for CoreDNS
+  ansible.builtin.command:
+    argv:
+      - "{{ k3s_binary }}"
+      - kubectl
+      - rollout
+      - status
+      - deployment/coredns
+      - --namespace
+      - kube-system
+      - --timeout=300s
+  environment:
+    KUBECONFIG: "{{ k3s_kubeconfig }}"
+  changed_when: false
+
+- name: Wait for metrics-server
+  ansible.builtin.command:
+    argv:
+      - "{{ k3s_binary }}"
+      - kubectl
+      - rollout
+      - status
+      - deployment/metrics-server
+      - --namespace
+      - kube-system
+      - --timeout=300s
+  environment:
+    KUBECONFIG: "{{ k3s_kubeconfig }}"
+  changed_when: false
+
+- name: Wait for local-path-provisioner
+  ansible.builtin.command:
+    argv:
+      - "{{ k3s_binary }}"
+      - kubectl
+      - rollout
+      - status
+      - deployment/local-path-provisioner
+      - --namespace
+      - kube-system
+      - --timeout=300s
+  environment:
+    KUBECONFIG: "{{ k3s_kubeconfig }}"
+  changed_when: false
+
+- name: Wait for Traefik
+  ansible.builtin.command:
+    argv:
+      - "{{ k3s_binary }}"
+      - kubectl
+      - rollout
+      - status
+      - deployment/traefik
+      - --namespace
+      - kube-system
+      - --timeout=300s
+  environment:
+    KUBECONFIG: "{{ k3s_kubeconfig }}"
+  register: rancher_traefik_ready
+  retries: 20
+  delay: 5
+  until: rancher_traefik_ready.rc == 0
+  changed_when: false
+
+
+# =========================================================
+# SHOW BASE CLUSTER
+# =========================================================
+
+- name: Get Kubernetes nodes
+  ansible.builtin.command:
+    argv:
+      - "{{ k3s_binary }}"
+      - kubectl
+      - get
+      - nodes
+      - -o
+      - wide
+  environment:
+    KUBECONFIG: "{{ k3s_kubeconfig }}"
+  register: rancher_nodes
+  changed_when: false
+
+- name: Show Kubernetes nodes
   ansible.builtin.debug:
-    var: k3s_nodes.stdout_lines
+    var: rancher_nodes.stdout_lines
 
 
-# ---------------------------------------------------------
-# Helm
-# ---------------------------------------------------------
+# =========================================================
+# HELM
+# =========================================================
+
+- name: Check Helm binary
+  ansible.builtin.stat:
+    path: "{{ helm_binary }}"
+  register: helm_binary_stat
 
 - name: Download Helm installer
   ansible.builtin.get_url:
-    url: https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
-    dest: /tmp/get-helm-3.sh
+    url: "{{ helm_install_url }}"
+    dest: "{{ helm_install_script }}"
+    owner: root
+    group: root
     mode: "0755"
+  when:
+    - not helm_binary_stat.stat.exists
 
 - name: Install Helm
   ansible.builtin.command:
-    cmd: /tmp/get-helm-3.sh
-    creates: /usr/local/bin/helm
+    cmd: "{{ helm_install_script }}"
+    creates: "{{ helm_binary }}"
+  environment:
+    DESIRED_VERSION: "{{ helm_version }}"
+    PATH: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+  when:
+    - not helm_binary_stat.stat.exists
 
-
-# ---------------------------------------------------------
-# Label ONLY this control-plane node for Rancher
-# ---------------------------------------------------------
-
-- name: Get Kubernetes node name
-  ansible.builtin.command:
-    cmd: hostname
-  register: rancher_node_name
-  changed_when: false
-
-- name: Label Rancher node
+- name: Get Helm version
   ansible.builtin.command:
     argv:
-      - k3s
+      - "{{ helm_binary }}"
+      - version
+      - --short
+  register: installed_helm_version
+  changed_when: false
+
+- name: Show Helm version
+  ansible.builtin.debug:
+    var: installed_helm_version.stdout
+
+
+# =========================================================
+# CHECK FOR STALE TERMINATING NAMESPACES
+# =========================================================
+
+- name: Check cert-manager namespace
+  ansible.builtin.command:
+    argv:
+      - "{{ k3s_binary }}"
       - kubectl
-      - label
-      - node
-      - "{{ rancher_node_name.stdout }}"
-      - "{{ rancher_node_label_key }}={{ rancher_node_label_value }}"
-      - --overwrite
+      - get
+      - namespace
+      - "{{ cert_manager_namespace }}"
+      - -o
+      - "jsonpath={.status.phase}"
+  environment:
+    KUBECONFIG: "{{ k3s_kubeconfig }}"
+  register: cert_manager_namespace_status
   changed_when: false
+  failed_when: false
 
+- name: Fail if cert-manager namespace is terminating
+  ansible.builtin.assert:
+    that:
+      - cert_manager_namespace_status.stdout != "Terminating"
+    fail_msg: >-
+      Namespace {{ cert_manager_namespace }} is terminating.
+      Clean it up before running the Rancher role.
 
-# ---------------------------------------------------------
-# cert-manager
-# ---------------------------------------------------------
-
-- name: Add Jetstack Helm repository
+- name: Check cattle-system namespace
   ansible.builtin.command:
     argv:
-      - helm
-      - repo
-      - add
-      - jetstack
-      - https://charts.jetstack.io
-      - --force-update
+      - "{{ k3s_binary }}"
+      - kubectl
+      - get
+      - namespace
+      - "{{ rancher_namespace }}"
+      - -o
+      - "jsonpath={.status.phase}"
   environment:
     KUBECONFIG: "{{ k3s_kubeconfig }}"
+  register: rancher_namespace_status
   changed_when: false
+  failed_when: false
 
-- name: Update Helm repositories
-  ansible.builtin.command:
-    cmd: helm repo update
-  environment:
-    KUBECONFIG: "{{ k3s_kubeconfig }}"
-  changed_when: false
+- name: Fail if cattle-system namespace is terminating
+  ansible.builtin.assert:
+    that:
+      - rancher_namespace_status.stdout != "Terminating"
+    fail_msg: >-
+      Namespace {{ rancher_namespace }} is terminating.
+      Clean it up before running the Rancher role.
+
+
+# =========================================================
+# CERT-MANAGER
+# =========================================================
 
 - name: Install cert-manager
   ansible.builtin.command:
     argv:
-      - helm
+      - "{{ helm_binary }}"
       - upgrade
       - --install
       - cert-manager
-      - jetstack/cert-manager
+      - "{{ cert_manager_chart }}"
       - --namespace
-      - cert-manager
+      - "{{ cert_manager_namespace }}"
       - --create-namespace
+      - --version
+      - "{{ cert_manager_version }}"
       - --set
       - crds.enabled=true
+      - --atomic
       - --wait
       - --timeout
-      - 5m
+      - "{{ cert_manager_timeout }}"
   environment:
     KUBECONFIG: "{{ k3s_kubeconfig }}"
+  register: cert_manager_install
 
-- name: Wait for cert-manager
+
+# =========================================================
+# CERT-MANAGER CRDS
+# =========================================================
+
+- name: Wait for cert-manager CRDs
   ansible.builtin.command:
     argv:
-      - k3s
+      - "{{ k3s_binary }}"
+      - kubectl
+      - wait
+      - --for=condition=Established
+      - --timeout=180s
+      - "crd/{{ item }}"
+  environment:
+    KUBECONFIG: "{{ k3s_kubeconfig }}"
+  loop:
+    - certificates.cert-manager.io
+    - certificaterequests.cert-manager.io
+    - challenges.acme.cert-manager.io
+    - clusterissuers.cert-manager.io
+    - issuers.cert-manager.io
+    - orders.acme.cert-manager.io
+  changed_when: false
+
+
+# =========================================================
+# CERT-MANAGER DEPLOYMENTS
+# =========================================================
+
+- name: Wait for cert-manager controller
+  ansible.builtin.command:
+    argv:
+      - "{{ k3s_binary }}"
       - kubectl
       - rollout
       - status
       - deployment/cert-manager
       - --namespace
-      - cert-manager
+      - "{{ cert_manager_namespace }}"
       - --timeout=300s
+  environment:
+    KUBECONFIG: "{{ k3s_kubeconfig }}"
+  changed_when: false
+
+- name: Wait for cert-manager cainjector
+  ansible.builtin.command:
+    argv:
+      - "{{ k3s_binary }}"
+      - kubectl
+      - rollout
+      - status
+      - deployment/cert-manager-cainjector
+      - --namespace
+      - "{{ cert_manager_namespace }}"
+      - --timeout=300s
+  environment:
+    KUBECONFIG: "{{ k3s_kubeconfig }}"
+  changed_when: false
+
+- name: Wait for cert-manager webhook
+  ansible.builtin.command:
+    argv:
+      - "{{ k3s_binary }}"
+      - kubectl
+      - rollout
+      - status
+      - deployment/cert-manager-webhook
+      - --namespace
+      - "{{ cert_manager_namespace }}"
+      - --timeout=300s
+  environment:
+    KUBECONFIG: "{{ k3s_kubeconfig }}"
   changed_when: false
 
 
-# ---------------------------------------------------------
-# Rancher
-# ---------------------------------------------------------
+# =========================================================
+# VERIFY WEBHOOK CA
+# =========================================================
 
-- name: Add Rancher stable Helm repository
+- name: Wait for cert-manager webhook CA secret
   ansible.builtin.command:
     argv:
-      - helm
+      - "{{ k3s_binary }}"
+      - kubectl
+      - get
+      - secret
+      - cert-manager-webhook-ca
+      - --namespace
+      - "{{ cert_manager_namespace }}"
+  environment:
+    KUBECONFIG: "{{ k3s_kubeconfig }}"
+  register: cert_manager_webhook_ca
+  retries: 30
+  delay: 5
+  until: cert_manager_webhook_ca.rc == 0
+  changed_when: false
+
+
+# =========================================================
+# VERIFY WEBHOOK ENDPOINT
+# =========================================================
+
+- name: Wait for cert-manager webhook endpoint
+  ansible.builtin.command:
+    argv:
+      - "{{ k3s_binary }}"
+      - kubectl
+      - get
+      - endpointslice
+      - --namespace
+      - "{{ cert_manager_namespace }}"
+      - --selector
+      - kubernetes.io/service-name=cert-manager-webhook
+      - -o
+      - "jsonpath={.items[0].endpoints[0].conditions.ready}"
+  environment:
+    KUBECONFIG: "{{ k3s_kubeconfig }}"
+  register: cert_manager_webhook_endpoint
+  retries: 30
+  delay: 5
+  until:
+    - cert_manager_webhook_endpoint.rc == 0
+    - cert_manager_webhook_endpoint.stdout == "true"
+  changed_when: false
+
+
+# =========================================================
+# SHOW CERT-MANAGER
+# =========================================================
+
+- name: Get cert-manager pods
+  ansible.builtin.command:
+    argv:
+      - "{{ k3s_binary }}"
+      - kubectl
+      - get
+      - pods
+      - --namespace
+      - "{{ cert_manager_namespace }}"
+      - -o
+      - wide
+  environment:
+    KUBECONFIG: "{{ k3s_kubeconfig }}"
+  register: cert_manager_pods
+  changed_when: false
+
+- name: Show cert-manager pods
+  ansible.builtin.debug:
+    var: cert_manager_pods.stdout_lines
+
+
+# =========================================================
+# RANCHER HELM REPOSITORY
+# =========================================================
+
+- name: Add Rancher Helm repository
+  ansible.builtin.command:
+    argv:
+      - "{{ helm_binary }}"
       - repo
       - add
-      - rancher-stable
-      - https://releases.rancher.com/server-charts/stable
+      - "{{ rancher_repo_name }}"
+      - "{{ rancher_repo_url }}"
       - --force-update
   environment:
     KUBECONFIG: "{{ k3s_kubeconfig }}"
@@ -125,61 +422,95 @@
 
 - name: Update Helm repositories
   ansible.builtin.command:
-    cmd: helm repo update
+    argv:
+      - "{{ helm_binary }}"
+      - repo
+      - update
   environment:
     KUBECONFIG: "{{ k3s_kubeconfig }}"
   changed_when: false
+
+
+# =========================================================
+# RANCHER
+# =========================================================
+#
+# Use a temporary values file so the bootstrap password does
+# not appear in the Helm command line.
+#
+# =========================================================
 
 - name: Install Rancher
+  block:
+
+    - name: Create temporary Rancher Helm values file
+      ansible.builtin.tempfile:
+        state: file
+        suffix: .yaml
+        prefix: rancher-values-
+      register: rancher_values_temp
+
+    - name: Write Rancher Helm values
+      ansible.builtin.copy:
+        dest: "{{ rancher_values_temp.path }}"
+        owner: root
+        group: root
+        mode: "0600"
+        content: |
+          hostname: {{ rancher_hostname | to_json }}
+
+          replicas: {{ rancher_replicas }}
+
+          bootstrapPassword: {{ rancher_bootstrap_password | to_json }}
+
+          ingress:
+            ingressClassName: {{ rancher_ingress_class | to_json }}
+            tls:
+              source: rancher
+      no_log: true
+
+    - name: Install or upgrade Rancher
+      ansible.builtin.command:
+        argv:
+          - "{{ helm_binary }}"
+          - upgrade
+          - --install
+          - rancher
+          - "{{ rancher_chart }}"
+          - --namespace
+          - "{{ rancher_namespace }}"
+          - --create-namespace
+          - --version
+          - "{{ rancher_version }}"
+          - --values
+          - "{{ rancher_values_temp.path }}"
+          - --atomic
+          - --wait
+          - --timeout
+          - "{{ rancher_timeout }}"
+      environment:
+        KUBECONFIG: "{{ k3s_kubeconfig }}"
+      register: rancher_install
+
+  always:
+
+    - name: Remove temporary Rancher Helm values file
+      ansible.builtin.file:
+        path: "{{ rancher_values_temp.path }}"
+        state: absent
+      when:
+        - rancher_values_temp is defined
+        - rancher_values_temp.path is defined
+
+
+# =========================================================
+# RANCHER ROLLOUT
+# =========================================================
+
+- name: Wait for Rancher deployment
   ansible.builtin.command:
     argv:
-      - helm
-      - upgrade
-      - --install
-      - rancher
-      - rancher-stable/rancher
-      - --namespace
-      - "{{ rancher_namespace }}"
-      - --create-namespace
-      - --set
-      - "hostname={{ rancher_hostname }}"
-      - --set
-      - "replicas={{ rancher_replicas }}"
-      - --set-string
-      - "bootstrapPassword={{ rancher_bootstrap_password }}"
-      - --wait
-      - --timeout
-      - 10m
-  environment:
-    KUBECONFIG: "{{ k3s_kubeconfig }}"
-  no_log: true
-
-
-# ---------------------------------------------------------
-# Force Rancher onto ONLY .100
-# ---------------------------------------------------------
-
-- name: Pin Rancher deployment to this control-plane node
-  ansible.builtin.command:
-    argv:
-      - k3s
-      - kubectl
-      - patch
-      - deployment
-      - rancher
-      - --namespace
-      - "{{ rancher_namespace }}"
-      - --type
-      - merge
-      - --patch
-      - >-
-        {"spec":{"template":{"spec":{"nodeSelector":{"{{ rancher_node_label_key }}":"{{ rancher_node_label_value }}"}}}}}
-  changed_when: false
-
-- name: Wait for Rancher rollout after node pinning
-  ansible.builtin.command:
-    argv:
-      - k3s
+      - "{{ k3s_binary }}"
       - kubectl
       - rollout
       - status
@@ -187,17 +518,19 @@
       - --namespace
       - "{{ rancher_namespace }}"
       - --timeout=600s
+  environment:
+    KUBECONFIG: "{{ k3s_kubeconfig }}"
   changed_when: false
 
 
-# ---------------------------------------------------------
-# Verification
-# ---------------------------------------------------------
+# =========================================================
+# VERIFY RANCHER
+# =========================================================
 
-- name: Check Rancher pod location
+- name: Get Rancher pods
   ansible.builtin.command:
     argv:
-      - k3s
+      - "{{ k3s_binary }}"
       - kubectl
       - get
       - pods
@@ -207,9 +540,62 @@
       - app=rancher
       - -o
       - wide
+  environment:
+    KUBECONFIG: "{{ k3s_kubeconfig }}"
   register: rancher_pods
   changed_when: false
 
-- name: Show Rancher pod
+- name: Show Rancher pods
   ansible.builtin.debug:
     var: rancher_pods.stdout_lines
+
+- name: Get Rancher service
+  ansible.builtin.command:
+    argv:
+      - "{{ k3s_binary }}"
+      - kubectl
+      - get
+      - service
+      - rancher
+      - --namespace
+      - "{{ rancher_namespace }}"
+      - -o
+      - wide
+  environment:
+    KUBECONFIG: "{{ k3s_kubeconfig }}"
+  register: rancher_service
+  changed_when: false
+
+- name: Show Rancher service
+  ansible.builtin.debug:
+    var: rancher_service.stdout_lines
+
+- name: Get Rancher ingress
+  ansible.builtin.command:
+    argv:
+      - "{{ k3s_binary }}"
+      - kubectl
+      - get
+      - ingress
+      - rancher
+      - --namespace
+      - "{{ rancher_namespace }}"
+      - -o
+      - wide
+  environment:
+    KUBECONFIG: "{{ k3s_kubeconfig }}"
+  register: rancher_ingress
+  changed_when: false
+
+- name: Show Rancher ingress
+  ansible.builtin.debug:
+    var: rancher_ingress.stdout_lines
+
+
+# =========================================================
+# ACCESS INFORMATION
+# =========================================================
+
+- name: Show Rancher URL
+  ansible.builtin.debug:
+    msg: "Rancher URL: https://{{ rancher_hostname }}"

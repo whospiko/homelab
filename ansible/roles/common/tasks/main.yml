@@ -1,4 +1,8 @@
 ---
+# =========================================================
+# PACKAGE REPOSITORIES
+# =========================================================
+
 - name: Update package metadata
   ansible.builtin.dnf:
     update_cache: true
@@ -22,10 +26,49 @@
   ansible.builtin.dnf:
     update_cache: true
 
+
+# =========================================================
+# BASE OS PACKAGES
+# =========================================================
+
 - name: Install common packages
   ansible.builtin.dnf:
     name: "{{ common_packages }}"
     state: present
+
+
+# =========================================================
+# KERNEL BASELINE
+# =========================================================
+
+- name: Update Rocky Linux kernel packages
+  ansible.builtin.dnf:
+    name:
+      - kernel
+      - kernel-core
+      - kernel-modules
+      - kernel-modules-extra
+    state: latest
+  register: bootstrap_kernel_update
+
+- name: Reboot after kernel update
+  ansible.builtin.reboot:
+    msg: "Rebooting after Rocky Linux kernel update"
+    reboot_timeout: 600
+    connect_timeout: 10
+    post_reboot_delay: 10
+  when:
+    - bootstrap_kernel_update.changed
+
+- name: Refresh Ansible facts after reboot
+  ansible.builtin.setup:
+  when:
+    - bootstrap_kernel_update.changed
+
+
+# =========================================================
+# QEMU GUEST AGENT
+# =========================================================
 
 - name: Check if QEMU guest agent device exists
   ansible.builtin.stat:
@@ -37,7 +80,13 @@
     name: qemu-guest-agent
     state: started
     enabled: true
-  when: qemu_ga_dev.stat.exists
+  when:
+    - qemu_ga_dev.stat.exists
+
+
+# =========================================================
+# TIMEZONE
+# =========================================================
 
 - name: Configure timezone
   ansible.builtin.file:
@@ -45,6 +94,11 @@
     dest: /etc/localtime
     state: link
     force: true
+
+
+# =========================================================
+# SSH
+# =========================================================
 
 - name: Configure SSH hardening
   ansible.builtin.copy:
@@ -62,14 +116,3 @@
       MaxAuthTries 3
       LoginGraceTime 30
   notify: Restart sshd
-
-- name: Install firewalld
-  ansible.builtin.dnf:
-    name: firewalld
-    state: present
-
-- name: Ensure firewalld is enabled
-  ansible.builtin.service:
-    name: firewalld
-    state: started
-    enabled: true

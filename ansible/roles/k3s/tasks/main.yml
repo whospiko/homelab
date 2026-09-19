@@ -1,4 +1,16 @@
 ---
+# =========================================================
+# VALIDATION
+# =========================================================
+
+- name: Verify K3s server group exists
+  ansible.builtin.assert:
+    that:
+      - groups.get('k3s_servers', []) | length > 0
+    fail_msg: "Inventory must contain at least one host in k3s_servers."
+  run_once: true
+
+
 - name: Verify host belongs to a K3s group
   ansible.builtin.assert:
     that:
@@ -11,123 +23,472 @@
       k3s_servers or k3s_agents.
 
 
-# ---------------------------------------------------------
-# OS requirements
-# ---------------------------------------------------------
+# =========================================================
+# K3S PACKAGES
+# =========================================================
+#
+# bootstrap is responsible for:
+#
+#   kernel
+#   kernel-core
+#   kernel-modules
+#   kernel-modules-extra
+#   reboot
+#
+# K3s only installs what it directly needs here.
+#
+# =========================================================
 
-- name: Install K3s OS requirements
+- name: Install K3s requirements
   ansible.builtin.dnf:
     name:
       - curl
-      - firewalld
-      - kernel-modules-extra
     state: present
 
 
-- name: Ensure firewalld is running
+# =========================================================
+# FIREWALL
+# =========================================================
+
+- name: Gather service facts
+  ansible.builtin.service_facts:
+
+
+- name: Disable firewalld on K3s nodes
   ansible.builtin.systemd_service:
     name: firewalld
-    state: started
-    enabled: true
-
-
-# ---------------------------------------------------------
-# Common K3s firewall rules
-# ---------------------------------------------------------
-
-- name: Trust K3s pod network
-  ansible.builtin.command:
-    cmd: >-
-      firewall-cmd
-      --permanent
-      --zone=trusted
-      --add-source={{ k3s_cluster_cidr }}
-  register: firewall_pod_network
-  changed_when:
-    - "'ALREADY_ENABLED' not in firewall_pod_network.stderr"
-
-
-- name: Trust K3s service network
-  ansible.builtin.command:
-    cmd: >-
-      firewall-cmd
-      --permanent
-      --zone=trusted
-      --add-source={{ k3s_service_cidr }}
-  register: firewall_service_network
-  changed_when:
-    - "'ALREADY_ENABLED' not in firewall_service_network.stderr"
-
-
-- name: Allow Flannel VXLAN
-  ansible.builtin.command:
-    cmd: firewall-cmd --permanent --add-port=8472/udp
-  register: firewall_flannel
-  changed_when:
-    - "'ALREADY_ENABLED' not in firewall_flannel.stderr"
-
-
-- name: Allow Kubelet API
-  ansible.builtin.command:
-    cmd: firewall-cmd --permanent --add-port=10250/tcp
-  register: firewall_kubelet
-  changed_when:
-    - "'ALREADY_ENABLED' not in firewall_kubelet.stderr"
-
-
-# ---------------------------------------------------------
-# Control-plane-only firewall
-# ---------------------------------------------------------
-
-- name: Allow Kubernetes API
-  ansible.builtin.command:
-    cmd: firewall-cmd --permanent --add-port=6443/tcp
-  register: firewall_kube_api
-  changed_when:
-    - "'ALREADY_ENABLED' not in firewall_kube_api.stderr"
+    state: stopped
+    enabled: false
   when:
-    - inventory_hostname in groups.get('k3s_servers', [])
+    - "'firewalld.service' in ansible_facts.services"
 
 
-- name: Allow embedded etcd client traffic
+# =========================================================
+# KERNEL MODULES
+# =========================================================
+
+- name: Configure persistent K3s kernel modules
+  ansible.builtin.copy:
+    dest: /etc/modules-load.d/k3s.conf
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      {% for module in k3s_kernel_modules %}
+      {{ module }}
+      {% endfor %}
+
+
+- name: Load required K3s kernel modules
   ansible.builtin.command:
-    cmd: firewall-cmd --permanent --add-port=2379/tcp
-  register: firewall_etcd_client
-  changed_when:
-    - "'ALREADY_ENABLED' not in firewall_etcd_client.stderr"
-  when:
-    - inventory_hostname in groups.get('k3s_servers', [])
-
-
-- name: Allow embedded etcd peer traffic
-  ansible.builtin.command:
-    cmd: firewall-cmd --permanent --add-port=2380/tcp
-  register: firewall_etcd_peer
-  changed_when:
-    - "'ALREADY_ENABLED' not in firewall_etcd_peer.stderr"
-  when:
-    - inventory_hostname in groups.get('k3s_servers', [])
-
-
-- name: Reload firewalld
-  ansible.builtin.command:
-    cmd: firewall-cmd --reload
+    argv:
+      - modprobe
+      - "{{ item }}"
+  loop: "{{ k3s_kernel_modules }}"
   changed_when: false
 
 
-# ---------------------------------------------------------
-# Dispatch K3s role
-# ---------------------------------------------------------
+# =========================================================
+# SYSCTL
+# =========================================================
 
-- name: Configure K3s server
+- name: Configure K3s networking sysctl
+  ansible.builtin.copy:
+    dest: /etc/sysctl.d/90-k3s.conf
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      net.ipv4.ip_forward = 1
+      net.bridge.bridge-nf-call-iptables = 1
+      net.bridge.bridge-nf-call-ip6tables = 1
+
+
+- name: Apply sysctl configuration
+  ansible.builtin.command:
+    cmd: sysctl --system
+  changed_when: false
+
+
+# =========================================================
+# SERVER
+# =========================================================
+
+- name: Configure K3s servers
   ansible.builtin.include_tasks:
     file: server.yml
   when:
     - inventory_hostname in groups.get('k3s_servers', [])
 
 
-- name: Configure K3s agent
+# =========================================================
+# AGENT
+# =========================================================
+#
+# server.yml completes first because Ansible's normal linear
+# strategy processes this include before the agent include.
+#
+# =========================================================
+
+- name: Configure K3s agents
   ansible.builtin.include_tasks:
     file: agent.yml
   when:
     - inventory_hostname in groups.get('k3s_agents', [])
+
+
+# =========================================================
+# WAIT FOR ALL NODES TO REGISTER
+# =========================================================
+
+- name: Wait for all K3s nodes to register
+  ansible.builtin.command:
+    argv:
+      - "{{ k3s_binary }}"
+      - kubectl
+      - get
+      - node
+      - "{{ item }}"
+  environment:
+    KUBECONFIG: "{{ k3s_kubeconfig }}"
+  loop: >-
+    {{
+      groups.get('k3s_servers', [])
+      +
+      groups.get('k3s_agents', [])
+    }}
+  register: k3s_node_registration
+  retries: 30
+  delay: 5
+  until: k3s_node_registration.rc == 0
+  changed_when: false
+  delegate_to: "{{ k3s_primary_server }}"
+  run_once: true
+
+
+# =========================================================
+# WAIT FOR NODES READY
+# =========================================================
+
+- name: Wait for all K3s nodes to become Ready
+  ansible.builtin.command:
+    argv:
+      - "{{ k3s_binary }}"
+      - kubectl
+      - wait
+      - --for=condition=Ready
+      - nodes
+      - --all
+      - "--timeout={{ k3s_node_ready_timeout }}"
+  environment:
+    KUBECONFIG: "{{ k3s_kubeconfig }}"
+  changed_when: false
+  delegate_to: "{{ k3s_primary_server }}"
+  run_once: true
+
+
+# =========================================================
+# WAIT FOR COREDNS
+# =========================================================
+
+- name: Wait for CoreDNS deployment
+  ansible.builtin.command:
+    argv:
+      - "{{ k3s_binary }}"
+      - kubectl
+      - rollout
+      - status
+      - deployment/coredns
+      - --namespace
+      - kube-system
+      - "--timeout={{ k3s_component_ready_timeout }}"
+  environment:
+    KUBECONFIG: "{{ k3s_kubeconfig }}"
+  changed_when: false
+  delegate_to: "{{ k3s_primary_server }}"
+  run_once: true
+
+
+# =========================================================
+# WAIT FOR LOCAL PATH PROVISIONER
+# =========================================================
+
+- name: Wait for local-path-provisioner deployment
+  ansible.builtin.command:
+    argv:
+      - "{{ k3s_binary }}"
+      - kubectl
+      - rollout
+      - status
+      - deployment/local-path-provisioner
+      - --namespace
+      - kube-system
+      - "--timeout={{ k3s_component_ready_timeout }}"
+  environment:
+    KUBECONFIG: "{{ k3s_kubeconfig }}"
+  changed_when: false
+  delegate_to: "{{ k3s_primary_server }}"
+  run_once: true
+
+
+# =========================================================
+# WAIT FOR METRICS SERVER
+# =========================================================
+
+- name: Wait for metrics-server deployment
+  ansible.builtin.command:
+    argv:
+      - "{{ k3s_binary }}"
+      - kubectl
+      - rollout
+      - status
+      - deployment/metrics-server
+      - --namespace
+      - kube-system
+      - "--timeout={{ k3s_component_ready_timeout }}"
+  environment:
+    KUBECONFIG: "{{ k3s_kubeconfig }}"
+  changed_when: false
+  delegate_to: "{{ k3s_primary_server }}"
+  run_once: true
+
+
+# =========================================================
+# WAIT FOR TRAEFIK
+# =========================================================
+
+- name: Wait for Traefik deployment to exist
+  ansible.builtin.command:
+    argv:
+      - "{{ k3s_binary }}"
+      - kubectl
+      - get
+      - deployment
+      - traefik
+      - --namespace
+      - kube-system
+  environment:
+    KUBECONFIG: "{{ k3s_kubeconfig }}"
+  register: k3s_traefik_deployment
+  retries: 30
+  delay: 5
+  until: k3s_traefik_deployment.rc == 0
+  changed_when: false
+  delegate_to: "{{ k3s_primary_server }}"
+  run_once: true
+
+
+- name: Wait for Traefik deployment
+  ansible.builtin.command:
+    argv:
+      - "{{ k3s_binary }}"
+      - kubectl
+      - rollout
+      - status
+      - deployment/traefik
+      - --namespace
+      - kube-system
+      - "--timeout={{ k3s_component_ready_timeout }}"
+  environment:
+    KUBECONFIG: "{{ k3s_kubeconfig }}"
+  changed_when: false
+  delegate_to: "{{ k3s_primary_server }}"
+  run_once: true
+
+
+# =========================================================
+# NETWORK TEST
+# =========================================================
+#
+# This specifically tests the problem encountered previously:
+#
+# Pod -> 10.43.0.1:443
+#
+# A test pod is scheduled on every K3s node.
+#
+# =========================================================
+
+- name: Verify Kubernetes service networking from every node
+  when:
+    - k3s_network_test_enabled | bool
+  block:
+
+    - name: Remove old K3s network test pods
+      ansible.builtin.command:
+        argv:
+          - "{{ k3s_binary }}"
+          - kubectl
+          - delete
+          - pod
+          - "k3s-netcheck-{{ item | lower }}"
+          - --ignore-not-found
+          - --wait=true
+      environment:
+        KUBECONFIG: "{{ k3s_kubeconfig }}"
+      loop: >-
+        {{
+          groups.get('k3s_servers', [])
+          +
+          groups.get('k3s_agents', [])
+        }}
+      changed_when: false
+      delegate_to: "{{ k3s_primary_server }}"
+      run_once: true
+
+
+    - name: Create K3s network test pod on every node
+      ansible.builtin.command:
+        argv:
+          - "{{ k3s_binary }}"
+          - kubectl
+          - run
+          - "k3s-netcheck-{{ item | lower }}"
+          - "--image={{ k3s_network_test_image }}"
+          - --restart=Never
+          - '--overrides={"spec":{"nodeName":"{{ item }}"}}'
+          - --
+          - sleep
+          - "300"
+      environment:
+        KUBECONFIG: "{{ k3s_kubeconfig }}"
+      loop: >-
+        {{
+          groups.get('k3s_servers', [])
+          +
+          groups.get('k3s_agents', [])
+        }}
+      changed_when: true
+      delegate_to: "{{ k3s_primary_server }}"
+      run_once: true
+
+
+    - name: Wait for K3s network test pods
+      ansible.builtin.command:
+        argv:
+          - "{{ k3s_binary }}"
+          - kubectl
+          - wait
+          - --for=condition=Ready
+          - "pod/k3s-netcheck-{{ item | lower }}"
+          - "--timeout={{ k3s_network_test_timeout }}"
+      environment:
+        KUBECONFIG: "{{ k3s_kubeconfig }}"
+      loop: >-
+        {{
+          groups.get('k3s_servers', [])
+          +
+          groups.get('k3s_agents', [])
+        }}
+      changed_when: false
+      delegate_to: "{{ k3s_primary_server }}"
+      run_once: true
+
+
+    - name: Test Kubernetes API ClusterIP from every node
+      ansible.builtin.command:
+        argv:
+          - "{{ k3s_binary }}"
+          - kubectl
+          - exec
+          - "k3s-netcheck-{{ item | lower }}"
+          - --
+          - nc
+          - -vz
+          - -w
+          - "5"
+          - "{{ k3s_kubernetes_service_ip }}"
+          - "443"
+      environment:
+        KUBECONFIG: "{{ k3s_kubeconfig }}"
+      loop: >-
+        {{
+          groups.get('k3s_servers', [])
+          +
+          groups.get('k3s_agents', [])
+        }}
+      register: k3s_service_network_test
+      changed_when: false
+      delegate_to: "{{ k3s_primary_server }}"
+      run_once: true
+
+  always:
+
+    - name: Remove K3s network test pods
+      ansible.builtin.command:
+        argv:
+          - "{{ k3s_binary }}"
+          - kubectl
+          - delete
+          - pod
+          - "k3s-netcheck-{{ item | lower }}"
+          - --ignore-not-found
+          - --wait=false
+      environment:
+        KUBECONFIG: "{{ k3s_kubeconfig }}"
+      loop: >-
+        {{
+          groups.get('k3s_servers', [])
+          +
+          groups.get('k3s_agents', [])
+        }}
+      changed_when: false
+      delegate_to: "{{ k3s_primary_server }}"
+      run_once: true
+      when:
+        - k3s_network_test_enabled | bool
+
+
+# =========================================================
+# VERIFY NODES
+# =========================================================
+
+- name: Get K3s nodes
+  ansible.builtin.command:
+    argv:
+      - "{{ k3s_binary }}"
+      - kubectl
+      - get
+      - nodes
+      - -o
+      - wide
+  environment:
+    KUBECONFIG: "{{ k3s_kubeconfig }}"
+  register: k3s_nodes
+  changed_when: false
+  delegate_to: "{{ k3s_primary_server }}"
+  run_once: true
+
+
+- name: Show K3s nodes
+  ansible.builtin.debug:
+    var: k3s_nodes.stdout_lines
+  run_once: true
+
+
+# =========================================================
+# VERIFY SYSTEM PODS
+# =========================================================
+
+- name: Get K3s system pods
+  ansible.builtin.command:
+    argv:
+      - "{{ k3s_binary }}"
+      - kubectl
+      - get
+      - pods
+      - --namespace
+      - kube-system
+      - -o
+      - wide
+  environment:
+    KUBECONFIG: "{{ k3s_kubeconfig }}"
+  register: k3s_system_pods
+  changed_when: false
+  delegate_to: "{{ k3s_primary_server }}"
+  run_once: true
+
+
+- name: Show K3s system pods
+  ansible.builtin.debug:
+    var: k3s_system_pods.stdout_lines
+  run_once: true
