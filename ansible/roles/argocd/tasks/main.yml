@@ -1,0 +1,385 @@
+---
+# =========================================================
+# K3S PREFLIGHT
+# =========================================================
+
+- name: Verify K3s kubeconfig exists
+  ansible.builtin.stat:
+    path: "{{ k3s_kubeconfig }}"
+  register: argocd_kubeconfig
+
+
+- name: Fail when K3s kubeconfig does not exist
+  ansible.builtin.assert:
+    that:
+      - argocd_kubeconfig.stat.exists
+    fail_msg: >-
+      K3s kubeconfig {{ k3s_kubeconfig }} does not exist.
+      Install K3s before installing Argo CD.
+
+
+# =========================================================
+# VERIFY TARGET NODE
+# =========================================================
+
+- name: Verify Argo CD target node exists
+  ansible.builtin.command:
+    argv:
+      - "{{ k3s_binary }}"
+      - kubectl
+      - get
+      - node
+      - "{{ argocd_target_node }}"
+  environment:
+    KUBECONFIG: "{{ k3s_kubeconfig }}"
+  register: argocd_target_node_check
+  changed_when: false
+
+
+- name: Wait for Argo CD target node to be Ready
+  ansible.builtin.command:
+    argv:
+      - "{{ k3s_binary }}"
+      - kubectl
+      - wait
+      - --for=condition=Ready
+      - "node/{{ argocd_target_node }}"
+      - --timeout=180s
+  environment:
+    KUBECONFIG: "{{ k3s_kubeconfig }}"
+  changed_when: false
+
+
+# =========================================================
+# LABEL WORKER NODE
+# =========================================================
+
+- name: Label Argo CD worker node
+  ansible.builtin.command:
+    argv:
+      - "{{ k3s_binary }}"
+      - kubectl
+      - label
+      - node
+      - "{{ argocd_target_node }}"
+      - "{{ argocd_node_label_key }}={{ argocd_node_label_value }}"
+      - --overwrite
+  environment:
+    KUBECONFIG: "{{ k3s_kubeconfig }}"
+  register: argocd_node_label
+  changed_when:
+    - "'not labeled' not in argocd_node_label.stdout"
+
+# =========================================================
+# VERIFY NODE LABEL
+# =========================================================
+
+- name: Verify Argo CD node label
+  ansible.builtin.command:
+    argv:
+      - "{{ k3s_binary }}"
+      - kubectl
+      - get
+      - nodes
+      - --selector
+      - "{{ argocd_node_label_key }}={{ argocd_node_label_value }}"
+      - -o
+      - name
+  environment:
+    KUBECONFIG: "{{ k3s_kubeconfig }}"
+  register: argocd_node_label_check
+  changed_when: false
+
+
+- name: Assert Argo CD node label
+  ansible.builtin.assert:
+    that:
+      - "'node/{{ argocd_target_node }}' in argocd_node_label_check.stdout_lines"
+    fail_msg: >-
+      Node {{ argocd_target_node }} does not have
+      {{ argocd_node_label_key }}={{ argocd_node_label_value }}.
+
+# =========================================================
+# HELM
+# =========================================================
+
+- name: Verify Helm exists
+  ansible.builtin.stat:
+    path: "{{ helm_binary }}"
+  register: argocd_helm_binary
+
+
+- name: Fail when Helm is not installed
+  ansible.builtin.assert:
+    that:
+      - argocd_helm_binary.stat.exists
+    fail_msg: >-
+      Helm is not installed at {{ helm_binary }}.
+      Install Helm before installing Argo CD.
+
+
+# =========================================================
+# ARGO HELM REPOSITORY
+# =========================================================
+
+- name: Add Argo Helm repository
+  ansible.builtin.command:
+    argv:
+      - "{{ helm_binary }}"
+      - repo
+      - add
+      - "{{ argocd_helm_repo_name }}"
+      - "{{ argocd_helm_repo_url }}"
+      - --force-update
+  environment:
+    KUBECONFIG: "{{ k3s_kubeconfig }}"
+  changed_when: false
+
+
+- name: Update Helm repositories
+  ansible.builtin.command:
+    argv:
+      - "{{ helm_binary }}"
+      - repo
+      - update
+  environment:
+    KUBECONFIG: "{{ k3s_kubeconfig }}"
+  changed_when: false
+
+
+# =========================================================
+# CHECK NAMESPACE
+# =========================================================
+
+- name: Check Argo CD namespace
+  ansible.builtin.command:
+    argv:
+      - "{{ k3s_binary }}"
+      - kubectl
+      - get
+      - namespace
+      - "{{ argocd_namespace }}"
+      - -o
+      - "jsonpath={.status.phase}"
+  environment:
+    KUBECONFIG: "{{ k3s_kubeconfig }}"
+  register: argocd_namespace_status
+  failed_when: false
+  changed_when: false
+
+
+- name: Fail if Argo CD namespace is terminating
+  ansible.builtin.assert:
+    that:
+      - argocd_namespace_status.stdout != "Terminating"
+    fail_msg: >-
+      Namespace {{ argocd_namespace }} is terminating.
+      Clean it before installing Argo CD.
+
+
+# =========================================================
+# ARGO CD VALUES
+# =========================================================
+
+- name: Create temporary Argo CD values file
+  ansible.builtin.tempfile:
+    state: file
+    prefix: argocd-values-
+    suffix: ".yaml"
+  register: argocd_values_file
+
+
+- name: Write Argo CD Helm values
+  ansible.builtin.copy:
+    dest: "{{ argocd_values_file.path }}"
+    owner: root
+    group: root
+    mode: "0600"
+    content: |
+      global:
+        nodeSelector:
+          {{ argocd_node_label_key }}: "{{ argocd_node_label_value }}"
+
+      configs:
+        params:
+          server.insecure: false
+
+# =========================================================
+# INSTALL ARGO CD
+# =========================================================
+
+- name: Install Argo CD
+  ansible.builtin.command:
+    argv:
+      - "{{ helm_binary }}"
+      - upgrade
+      - --install
+      - argocd
+      - "{{ argocd_chart }}"
+      - --namespace
+      - "{{ argocd_namespace }}"
+      - --create-namespace
+      - --version
+      - "{{ argocd_chart_version }}"
+      - --values
+      - "{{ argocd_values_file.path }}"
+      - --atomic
+      - --wait
+      - --timeout
+      - "{{ argocd_timeout }}"
+  environment:
+    KUBECONFIG: "{{ k3s_kubeconfig }}"
+  register: argocd_install
+
+
+- name: Remove temporary Argo CD values file
+  ansible.builtin.file:
+    path: "{{ argocd_values_file.path }}"
+    state: absent
+
+
+# =========================================================
+# WAIT FOR ARGO CD COMPONENTS
+# =========================================================
+
+- name: Wait for Argo CD server
+  ansible.builtin.command:
+    argv:
+      - "{{ k3s_binary }}"
+      - kubectl
+      - rollout
+      - status
+      - deployment/argocd-server
+      - --namespace
+      - "{{ argocd_namespace }}"
+      - --timeout=300s
+  environment:
+    KUBECONFIG: "{{ k3s_kubeconfig }}"
+  changed_when: false
+
+
+- name: Wait for Argo CD repo server
+  ansible.builtin.command:
+    argv:
+      - "{{ k3s_binary }}"
+      - kubectl
+      - rollout
+      - status
+      - deployment/argocd-repo-server
+      - --namespace
+      - "{{ argocd_namespace }}"
+      - --timeout=300s
+  environment:
+    KUBECONFIG: "{{ k3s_kubeconfig }}"
+  changed_when: false
+
+
+- name: Wait for Argo CD application controller
+  ansible.builtin.command:
+    argv:
+      - "{{ k3s_binary }}"
+      - kubectl
+      - rollout
+      - status
+      - statefulset/argocd-application-controller
+      - --namespace
+      - "{{ argocd_namespace }}"
+      - --timeout=300s
+  environment:
+    KUBECONFIG: "{{ k3s_kubeconfig }}"
+  changed_when: false
+
+
+# =========================================================
+# VERIFY POD PLACEMENT
+# =========================================================
+
+- name: Get Argo CD pods
+  ansible.builtin.command:
+    argv:
+      - "{{ k3s_binary }}"
+      - kubectl
+      - get
+      - pods
+      - --namespace
+      - "{{ argocd_namespace }}"
+      - -o
+      - wide
+  environment:
+    KUBECONFIG: "{{ k3s_kubeconfig }}"
+  register: argocd_pods
+  changed_when: false
+
+
+- name: Show Argo CD pods
+  ansible.builtin.debug:
+    var: argocd_pods.stdout_lines
+
+
+# =========================================================
+# VERIFY ALL ARGO CD PODS ARE ON TARGET NODE
+# =========================================================
+
+- name: Get nodes running Argo CD pods
+  ansible.builtin.command:
+    argv:
+      - "{{ k3s_binary }}"
+      - kubectl
+      - get
+      - pods
+      - --namespace
+      - "{{ argocd_namespace }}"
+      - -o
+      - "jsonpath={range .items[*]}{.metadata.name}{'='}{.spec.nodeName}{'\\n'}{end}"
+  environment:
+    KUBECONFIG: "{{ k3s_kubeconfig }}"
+  register: argocd_pod_nodes
+  changed_when: false
+
+
+- name: Show Argo CD pod placement
+  ansible.builtin.debug:
+    var: argocd_pod_nodes.stdout_lines
+
+
+- name: Verify Argo CD pod placement
+  ansible.builtin.assert:
+    that:
+      - >
+        (
+          argocd_pod_nodes.stdout_lines
+          | map('regex_replace', '^.*=', '')
+          | reject('equalto', argocd_target_node)
+          | list
+          | length
+        ) == 0
+    fail_msg: >-
+      One or more Argo CD pods are not running on
+      {{ argocd_target_node }}.
+
+
+# =========================================================
+# ARGO CD SERVICE
+# =========================================================
+
+- name: Get Argo CD service
+  ansible.builtin.command:
+    argv:
+      - "{{ k3s_binary }}"
+      - kubectl
+      - get
+      - service
+      - argocd-server
+      - --namespace
+      - "{{ argocd_namespace }}"
+      - -o
+      - wide
+  environment:
+    KUBECONFIG: "{{ k3s_kubeconfig }}"
+  register: argocd_service
+  changed_when: false
+
+
+- name: Show Argo CD service
+  ansible.builtin.debug:
+    var: argocd_service.stdout_lines

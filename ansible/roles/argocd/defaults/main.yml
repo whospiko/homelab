@@ -1,0 +1,40 @@
+---
+# =========================================================
+# K3S
+# =========================================================
+
+k3s_binary: "/usr/local/bin/k3s"
+k3s_kubeconfig: "/etc/rancher/k3s/k3s.yaml"
+
+
+# =========================================================
+# HELM
+# =========================================================
+
+helm_binary: "/usr/local/bin/helm"
+
+argocd_helm_repo_name: "argo"
+argocd_helm_repo_url: "https://argoproj.github.io/argo-helm"
+
+argocd_chart: "argo/argo-cd"
+argocd_chart_version: "10.9.2"
+
+
+# =========================================================
+# ARGO CD
+# =========================================================
+
+argocd_namespace: "argocd"
+
+argocd_timeout: "10m"
+
+
+# =========================================================
+# NODE PLACEMENT
+# =========================================================
+
+# Kubernetes node that should run Argo CD.
+argocd_target_node: "worker-01"
+
+argocd_node_label_key: "homelab.io/argocd"
+argocd_node_label_value: "true"
