@@ -8,7 +8,7 @@ module "cp-01" {
 
   tags = [ "cp", "homelab" ]
 
-  cores     = 4
+  cores     = 2
   memory    = 8192
   disk_size = 40
 
