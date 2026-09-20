@@ -1,0 +1,10 @@
+---
+gitops_argocd_namespace: argocd
+gitops_root_application_name: homelab
+gitops_kubectl_command: /usr/local/bin/k3s kubectl
+
+gitops_root_application_file: >-
+  {{ playbook_dir }}/../../cluster/homelab/gitops/bootstrap/root-app.yaml
+
+gitops_wait_retries: 30
+gitops_wait_delay: 10

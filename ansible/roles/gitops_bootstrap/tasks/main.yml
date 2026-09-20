@@ -1,0 +1,224 @@
+---
+# =========================================================
+# GitOps Bootstrap
+# =========================================================
+
+# ---------------------------------------------------------
+# Validate K3s
+# ---------------------------------------------------------
+
+- name: Check K3s cluster connectivity
+  ansible.builtin.command:
+    cmd: "{{ gitops_kubectl_command }} get nodes"
+  register: gitops_k3s_check
+  changed_when: false
+
+
+- name: Show Kubernetes nodes
+  ansible.builtin.debug:
+    var: gitops_k3s_check.stdout_lines
+
+# ---------------------------------------------------------
+# Validate Argo CD Namespace
+# ---------------------------------------------------------
+
+- name: Check Argo CD namespace
+  ansible.builtin.command:
+    cmd: >
+      {{ gitops_kubectl_command }}
+      get namespace
+      {{ gitops_argocd_namespace }}
+  register: gitops_argocd_namespace_check
+  changed_when: false
+  failed_when: false
+
+
+- name: Show namespace output
+  ansible.builtin.debug:
+    var: gitops_argocd_namespace_check.stdout_lines
+
+- name: Fail if Argo CD namespace does not exist
+  ansible.builtin.fail:
+    msg: >-
+      Argo CD namespace '{{ gitops_argocd_namespace }}'
+      does not exist.
+
+      Install Argo CD using your existing Ansible installation
+      before running bootstrap-gitops.yml.
+  when: gitops_argocd_namespace_check.rc != 0
+
+# ---------------------------------------------------------
+# Wait for Argo CD Application CRD
+# ---------------------------------------------------------
+
+- name: Wait for Argo CD Application CRD
+  ansible.builtin.command:
+    cmd: >
+      {{ gitops_kubectl_command }}
+      get crd
+      applications.argoproj.io
+  register: gitops_application_crd
+  changed_when: false
+  failed_when: false
+  retries: "{{ gitops_wait_retries }}"
+  delay: "{{ gitops_wait_delay }}"
+  until: gitops_application_crd.rc == 0
+
+
+- name: Wait until Application CRD is established
+  ansible.builtin.command:
+    cmd: >
+      {{ gitops_kubectl_command }}
+      wait
+      --for=condition=Established
+      crd/applications.argoproj.io
+      --timeout=300s
+  changed_when: false
+
+# ---------------------------------------------------------
+# Verify Argo CD Components
+# ---------------------------------------------------------
+
+- name: Check Argo CD application controller
+  ansible.builtin.command:
+    cmd: >
+      {{ gitops_kubectl_command }}
+      -n {{ gitops_argocd_namespace }}
+      get deployment
+      argocd-applicationset-controller
+  register: gitops_argocd_controller_check
+  changed_when: false
+  failed_when: false
+
+
+- name: Check Argo CD pods
+  ansible.builtin.command:
+    cmd: >
+      {{ gitops_kubectl_command }}
+      -n {{ gitops_argocd_namespace }}
+      get pods -o wide
+  register: gitops_argocd_pods
+  changed_when: false
+
+
+- name: Show Argo CD pods
+  ansible.builtin.debug:
+    var: gitops_argocd_pods.stdout_lines
+
+# ---------------------------------------------------------
+# Validate Root Application Manifest Locally
+# ---------------------------------------------------------
+
+- name: Check root Application manifest exists
+  ansible.builtin.stat:
+    path: "{{ gitops_root_application_file }}"
+  delegate_to: localhost
+  become: false
+  register: gitops_root_application_stat
+
+
+- name: Fail if root Application manifest does not exist
+  ansible.builtin.fail:
+    msg: >-
+      GitOps root Application manifest was not found:
+
+      {{ gitops_root_application_file }}
+
+      Expected:
+      cluster/homelab/gitops/bootstrap/root-app.yaml
+  when: not gitops_root_application_stat.stat.exists
+
+# ---------------------------------------------------------
+# Load Root Application Manifest
+# ---------------------------------------------------------
+
+- name: Read root Application manifest
+  ansible.builtin.set_fact:
+    gitops_root_application_manifest: >-
+      {{
+        lookup(
+          'ansible.builtin.file',
+          gitops_root_application_file
+        )
+      }}
+
+# ---------------------------------------------------------
+# Bootstrap Argo CD
+# ---------------------------------------------------------
+
+- name: Apply root Argo CD Application
+  ansible.builtin.command:
+    cmd: >
+      {{ gitops_kubectl_command }}
+      apply
+      -f -
+    stdin: "{{ gitops_root_application_manifest }}"
+  register: gitops_bootstrap_result
+  changed_when: >
+    'created' in gitops_bootstrap_result.stdout or
+    'configured' in gitops_bootstrap_result.stdout
+
+
+- name: Show bootstrap result
+  ansible.builtin.debug:
+    var: gitops_bootstrap_result.stdout_lines
+
+# ---------------------------------------------------------
+# Verify Root Application
+# ---------------------------------------------------------
+
+- name: Wait for root Argo CD Application to exist
+  ansible.builtin.command:
+    cmd: >
+      {{ gitops_kubectl_command }}
+      -n {{ gitops_argocd_namespace }}
+      get application
+      {{ gitops_root_application_name }}
+  register: gitops_root_application
+  changed_when: false
+  retries: "{{ gitops_wait_retries }}"
+  delay: "{{ gitops_wait_delay }}"
+  until: gitops_root_application.rc == 0
+
+# ---------------------------------------------------------
+# Display GitOps Status
+# ---------------------------------------------------------
+
+- name: Get root Application status
+  ansible.builtin.command:
+    cmd: >
+      {{ gitops_kubectl_command }}
+      -n {{ gitops_argocd_namespace }}
+      get application
+      {{ gitops_root_application_name }}
+      -o wide
+  register: gitops_root_application_status
+  changed_when: false
+
+
+- name: Show root Application status
+  ansible.builtin.debug:
+    var: gitops_root_application_status.stdout_lines
+
+
+# ---------------------------------------------------------
+# Bootstrap Complete
+# ---------------------------------------------------------
+
+- name: GitOps bootstrap completed
+  ansible.builtin.debug:
+    msg:
+      - "=============================================="
+      - " GitOps bootstrap completed"
+      - "=============================================="
+      - ""
+      - "Root Application:"
+      - "{{ gitops_root_application_name }}"
+      - ""
+      - "Argo CD namespace:"
+      - "{{ gitops_argocd_namespace }}"
+      - ""
+      - "Kubernetes changes should now be made through Git."
+      - ""
+      - "Git -> Argo CD -> Kubernetes"
+      - "=============================================="

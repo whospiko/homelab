@@ -1,0 +1,8 @@
+---
+- name: Bootstrap Homelab GitOps
+  hosts: cluster_admin_hosts
+  become: true
+  gather_facts: false
+
+  roles:
+    - gitops_bootstrap
