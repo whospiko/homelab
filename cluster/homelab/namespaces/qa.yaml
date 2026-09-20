@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: Namespace
+
+metadata:
+  name: qa
+
+  labels:
+    environment: qa
+    managed-by: argocd
+
+  annotations:
+    argocd.argoproj.io/sync-options: Prune=confirm

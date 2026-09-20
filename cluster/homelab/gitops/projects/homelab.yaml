@@ -1,0 +1,32 @@
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: homelab
+  namespace: argocd
+  # Finalizer to safely handle project deletion
+  annotations:
+    argocd.argoproj.io/sync-wave: "-10"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  description: "Homelab Cluster GitOps Project"
+  
+  # Limit where applications in this project can pull manifests from
+  sourceRepos:
+    - "https://github.com/whospiko/homelab.git"
+    - "https://charts.jetstack.io"
+    
+  # Limit which clusters and namespaces applications can deploy into
+  destinations:
+    - namespace: "*"
+      server: "https://kubernetes.default.svc"
+      
+  # Define cluster-level resource restrictions (optional whitelist/blacklist)
+  clusterResourceWhitelist:
+    - group: "*"
+      kind: "*"
+      
+  # Namespace-level resource guardrails (optional)
+  namespaceResourceBlacklist:
+    - group: "*"
+      kind: "*"
