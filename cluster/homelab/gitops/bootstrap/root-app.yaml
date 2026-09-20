@@ -3,6 +3,9 @@ kind: Application
 metadata:
   name: homelab
   namespace: argocd
+
+  finalizers:
+  - resources-finalizer.argocd.argoproj.io
 spec:
   project: default
   source:
