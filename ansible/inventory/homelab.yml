@@ -37,9 +37,10 @@ all:
           ansible_host: 192.168.100.200
 
         # Future workers
-        #
-        # worker-02:
-        #   ansible_host: 192.168.100.201
+        # Database
+        worker-99:
+          ansible_host: 192.168.100.99
+        
         #
         # worker-03:
         #   ansible_host: 192.168.100.202
